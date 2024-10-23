@@ -7,8 +7,13 @@ from tqdm import tqdm
 # from tqdm import tqdm_notebook as tqdm
 from heapq import heappush, heappop
 import random
+import time
 import itertools
+import hnswlib
+import networkx as nx
 random.seed(108)
+from hnsw import HNSW
+from hnsw import l2_distance, heuristic
 
 class KmGraph(object):
     def __init__(self, k, M, dim, dist_func, data):
@@ -257,6 +262,15 @@ def read_ivecs(filename):
             yield vec
 
 
+def read_fbin(filepath, start_idx=0, chunk_size=None):
+    with open(filepath, "rb") as file:
+        total_vectors, vector_dim = np.fromfile(file, count=2, dtype=np.int32)
+        num_vectors_to_read = (total_vectors - start_idx) if chunk_size is None else chunk_size
+        vector_data = np.fromfile(file, count=num_vectors_to_read * vector_dim, 
+                                  dtype=np.float32, offset=start_idx * 4 * vector_dim)
+    return vector_data.reshape(num_vectors_to_read, vector_dim)
+
+
 def load_sift_dataset():
     train_file = 'datasets/siftsmall/siftsmall_base.fvecs'
     test_file = 'datasets/siftsmall/siftsmall_query.fvecs'
@@ -269,6 +283,12 @@ def load_sift_dataset():
     return train_data, test_data, groundtruth_data
 
 
+def load_yandex10m_dataset():
+    train_file = 'datasets/base.10M.fbin'
+    train_data = np.array(list(read_fbin(train_file)))
+    return train_data
+
+
 def generate_synthetic_data(dim, n, nq):
     train_data = np.random.random((n, dim)).astype(np.float32)
     test_data = np.random.random((nq, dim)).astype(np.float32)
@@ -277,34 +297,57 @@ def generate_synthetic_data(dim, n, nq):
 
 def main():
     parser = argparse.ArgumentParser(description='Test recall of beam search method with KGraph.')
-    parser.add_argument('--dataset', choices=['synthetic', 'sift'], default='synthetic', help="Choose the dataset to use: 'synthetic' or 'sift'.")
+    parser.add_argument('--dataset', default='base.10M.fbin',
+                        help="Path to dataset file in .fbin format")
     parser.add_argument('--K', type=int, default=5, help='The size of the neighbourhood')
     parser.add_argument('--M', type=int, default=50, help='Number of random edges')
+    parser.add_argument('--M0', type=int, default=32, help='Avg number of neighbors')
     parser.add_argument('--dim', type=int, default=2, help='Dimensionality of synthetic data (ignored for SIFT).')
     parser.add_argument('--n', type=int, default=200, help='Number of training points for synthetic data (ignored for SIFT).')
     parser.add_argument('--nq', type=int, default=50, help='Number of query points for synthetic data (ignored for SIFT).')
     parser.add_argument('--k', type=int, default=5, help='Number of nearest neighbors to search in the test stage')
     parser.add_argument('--ef', type=int, default=10, help='Size of the beam for beam search.')
+    parser.add_argument('--ef_construction', type=int, default=64, help='Size of the beam for beam search')
     parser.add_argument('--m', type=int, default=3, help='Number of random entry points.')
 
     args = parser.parse_args()
 
     # Load dataset
-    if args.dataset == 'sift':
-        print("Loading SIFT dataset...")
-        train_data, test_data, groundtruth_data = load_sift_dataset()
-    else:
-        print(f"Generating synthetic dataset with {args.dim}-dimensional space...")
-        train_data, test_data = generate_synthetic_data(args.dim, args.n, args.nq)
-        groundtruth_data = None
+    print(f"Reading dataset from *.fbin file...")
+    vecs = read_fbin(args.dataset)#[:1000000]
+    
+    # Initialize hnswlib Index
+    dim = vecs.shape[1]  # Assuming vectors have the shape (num_vectors, vector_dim)
+    num_elements = vecs.shape[0]  # Number of vectors
+    print(f"Parameters: M = {args.M}, M0 = {2 * args.M}, ef_construction = {args.ef_construction}")
+    print(f"Initializing hnsw...")
+   
+    start = time.time()
+    
+    hnsw_index = hnswlib.Index(space="l2", dim=dim)
+    hnsw_index.init_index(
+        max_elements=num_elements, ef_construction=args.ef_construction, M=args.M
+    )
+    # Adding vecs to HNSW
+    hnsw_index.add_items(vecs)
+    
+    labels, _ = hnsw_index.knn_query(vecs, k=args.M)
 
-    # Create KGraph
-    kg = KmGraph(k=args.K, dim=args.dim, dist_func=KGraph.l2_distance, data=train_data, M=args.M)
+    # Building graph based on nearest neighbors
+    print(f"Building graph based on nearest neighbors...")
+    graph = nx.Graph()
 
-    # Calculate recall
-    recall, avg_cal = calculate_recall(kg, test_data, groundtruth_data, k=args.k, ef=args.ef, m=args.m)
-    print(f"Average recall: {recall}, avg calc: {avg_cal}")
+    for node_id, neighbors in enumerate(labels):
+        for neighbor_id in neighbors:
+            if node_id != neighbor_id:
+                graph.add_edge(node_id, neighbor_id)
 
+    print(f"Computing number of components...")
+    num_components = nx.number_connected_components(graph)
+
+    print(f"Number of connected components: {num_components}")
+
+    print("Execution time: ", time.time() - start, "seconds")
 
 if __name__ == "__main__":
     main()
