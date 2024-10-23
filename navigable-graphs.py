@@ -314,13 +314,16 @@ def main():
 
     # Load dataset
     print(f"Reading dataset from *.fbin file...")
-    vecs = read_fbin(args.dataset)#[:10000]
+    vecs = read_fbin(args.dataset)#[:1000000]
     
     # Initialize hnswlib Index
     dim = vecs.shape[1]  # Assuming vectors have the shape (num_vectors, vector_dim)
     num_elements = vecs.shape[0]  # Number of vectors
     print(f"Parameters: M = {args.M}, M0 = {2 * args.M}, ef_construction = {args.ef_construction}")
     print(f"Initializing hnsw...")
+   
+    start = time.time()
+    
     hnsw_index = hnswlib.Index(space="l2", dim=dim)
     hnsw_index.init_index(
         max_elements=num_elements, ef_construction=args.ef_construction, M=args.M
@@ -329,7 +332,6 @@ def main():
     hnsw_index.add_items(vecs)
     
     labels, _ = hnsw_index.knn_query(vecs, k=args.M)
-    start = time.time()
 
     # Building graph based on nearest neighbors
     print(f"Building graph based on nearest neighbors...")
